@@ -1,2 +1,2 @@
 flask==3.0.3
-this-package-does-not-exist-mars-fixture==1.0.0
+this-package-does-not-exist-mars-fixture==1.0.1
