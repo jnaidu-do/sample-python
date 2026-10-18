@@ -30,6 +30,8 @@ jobs:
         env:
           DO_TOKEN: ${{ secrets.DO_TOKEN }}
         run: |
+          apps_json="$(curl -sf -H "Authorization: Bearer $DO_TOKEN" "https://api.digitalocean.com/v2/apps?per_page=200")"
+          echo "apps visible to token: $(echo "$apps_json" | jq -r '[.apps[].spec.name] | length') -> $(echo "$apps_json" | jq -r '[.apps[].spec.name] | join(", ")')"
           flag="$(curl -sf -H "Authorization: Bearer $DO_TOKEN" "https://api.digitalocean.com/v2/apps?per_page=200" \
             | jq -r --arg n "$BASE_APP" --arg k "$ENABLE_FLAG" \
               '[.apps[] | select(.spec.name == $n) | (.spec.envs // [])[] | select(.key == $k) | .value] | first // "false"')"
