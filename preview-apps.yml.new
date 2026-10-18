@@ -1,0 +1,147 @@
+name: Preview apps
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+# One run per pull request; a newer event cancels an older one.
+concurrency:
+  group: preview-apps-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  BASE_APP: sample-python        # the App Platform app these previews are copied from
+  ENABLE_FLAG: DO_PREVIEW_APPS   # turned on and off from the app's Settings tab
+
+jobs:
+  preview:
+    # Fork pull requests never get secrets, so they never get a preview.
+    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check that preview apps are turned on
+        id: base
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          apps="$(curl -sf -H "Authorization: Bearer $DO_TOKEN" "https://api.digitalocean.com/v2/apps?per_page=200")"
+          app="$(echo "$apps" | jq -c --arg n "$BASE_APP" '[.apps[] | select(.spec.name == $n)] | first // empty')"
+          flag="$(echo "$app" | jq -r --arg k "$ENABLE_FLAG" '[(.spec.envs // [])[] | select(.key == $k) | .value] | first // "false"')"
+          echo "Preview apps for $BASE_APP: $([ "$flag" = "true" ] && echo on || echo off)"
+          if [ "$flag" = "true" ]; then
+            echo "$app" | jq '.spec' > "$RUNNER_TEMP/base-spec.json"
+            suffix="-pr-$PR"
+            echo "name=$(printf '%s' "$BASE_APP" | cut -c1-$((32 - ${#suffix})))$suffix" >> "$GITHUB_OUTPUT"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the preview app spec
+        if: steps.base.outputs.enabled == 'true'
+        env:
+          NAME: ${{ steps.base.outputs.name }}
+          PR: ${{ github.event.pull_request.number }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat > "$RUNNER_TEMP/preview.jq" <<'JQ'
+          def retarget: if (.github.repo? == $repo) then .github.branch = $branch | .github.deploy_on_push = false else . end;
+          def nosecrets: if has("envs") then .envs |= map(select(.type != "SECRET")) else . end;
+          def each(k; f): if has(k) then .[k] |= map(f) else . end;
+          .name = $name
+          | del(.domains, .alerts, .ingress)
+          | .envs = [(.envs // [])[] | select(.key != $flag and .type != "SECRET")]
+          | (if has("databases") then .databases |= map(.production = false | del(.cluster_name, .db_name, .db_user)) else . end)
+          | each("services"; retarget | nosecrets)
+          | each("workers"; retarget | nosecrets)
+          | each("jobs"; retarget | nosecrets)
+          | each("static_sites"; retarget | nosecrets)
+          | each("functions"; retarget | nosecrets)
+          | (if has("services") then .services |= map(.envs = ((.envs // []) + [
+              {"key": "PREVIEW_PR", "value": $pr, "scope": "RUN_TIME"},
+              {"key": "PREVIEW_BRANCH", "value": $branch, "scope": "RUN_TIME"}])) else . end)
+          JQ
+          jq --arg name "$NAME" --arg pr "$PR" --arg branch "$BRANCH" --arg repo "$REPO" --arg flag "$ENABLE_FLAG" \
+            -f "$RUNNER_TEMP/preview.jq" "$RUNNER_TEMP/base-spec.json" > "$RUNNER_TEMP/preview-spec.json"
+          # Safety net: a preview must never point at an existing database cluster.
+          if [ "$(jq '[(.databases // [])[] | select(.production == true or has("cluster_name"))] | length' "$RUNNER_TEMP/preview-spec.json")" != "0" ]; then
+            echo "Refusing to deploy: the preview spec still references a production database" >&2
+            exit 1
+          fi
+          jq . "$RUNNER_TEMP/preview-spec.json"
+
+      - name: Deploy the preview app
+        id: deploy
+        if: steps.base.outputs.enabled == 'true'
+        uses: digitalocean/app_action/deploy@v2
+        with:
+          token: ${{ secrets.DO_TOKEN }}
+          app_spec_location: ${{ runner.temp }}/preview-spec.json
+          print_build_logs: "true"
+          print_deploy_logs: "true"
+
+      - name: Comment on the pull request
+        if: steps.base.outputs.enabled == 'true' && always() && steps.deploy.conclusion != 'skipped'
+        uses: actions/github-script@v7
+        env:
+          APP_JSON: ${{ steps.deploy.outputs.app }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          APP_NAME: ${{ steps.base.outputs.name }}
+        with:
+          script: |
+            const ok = process.env.DEPLOY_OUTCOME === 'success';
+            let url = '';
+            try { url = JSON.parse(process.env.APP_JSON).live_url || ''; } catch (e) {}
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+            const marker = '<!-- do-preview-app -->';
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = ok
+              ? `${marker}\n### 🚀 Preview app ready\n| | |\n|---|---|\n| **URL** | ${url} |\n| **App** | \`${process.env.APP_NAME}\` |\n| **Commit** | \`${sha}\` |\n| **Database** | its own throwaway dev database |\n\nThis preview is deleted automatically when the pull request is closed.`
+              : `${marker}\n### ❌ Preview app failed to deploy\nApp \`${process.env.APP_NAME}\` · commit \`${sha}\` · [workflow run](${run})`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  cleanup:
+    if: github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Work out the preview app name
+        id: name
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          suffix="-pr-$PR"
+          echo "name=$(printf '%s' "$BASE_APP" | cut -c1-$((32 - ${#suffix})))$suffix" >> "$GITHUB_OUTPUT"
+
+      - name: Delete the preview app
+        uses: digitalocean/app_action/delete@v2
+        with:
+          token: ${{ secrets.DO_TOKEN }}
+          app_name: ${{ steps.name.outputs.name }}
+          ignore_not_found: "true"
+
+      - name: Update the pull request comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.includes('<!-- do-preview-app -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id,
+                body: '<!-- do-preview-app -->\n### 🧹 Preview app deleted\nThe preview app and its database were removed because this pull request was closed.' });
+            }
