@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 PREVIEW_PR = os.getenv("PREVIEW_PR", "")
 PREVIEW_BRANCH = os.getenv("PREVIEW_BRANCH", "")
-HEADLINE = "Hello from Sample Python"
+HEADLINE = "Hello from Sample Python, now reviewed in a preview app!"
 
 
 def connect():
