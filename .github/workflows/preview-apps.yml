@@ -43,6 +43,7 @@ jobs:
           fi
 
       - name: Build the preview app spec
+        id: spec
         if: steps.base.outputs.enabled == 'true'
         env:
           NAME: ${{ steps.base.outputs.name }}
@@ -75,6 +76,7 @@ jobs:
             exit 1
           fi
           jq . "$RUNNER_TEMP/preview-spec.json"
+          echo "has_db=$(jq '(.databases // []) | length > 0' "$RUNNER_TEMP/preview-spec.json")" >> "$GITHUB_OUTPUT"
 
       - name: Deploy the preview app
         id: deploy
@@ -93,6 +95,7 @@ jobs:
           APP_JSON: ${{ steps.deploy.outputs.app }}
           DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
           APP_NAME: ${{ steps.base.outputs.name }}
+          HAS_DB: ${{ steps.spec.outputs.has_db }}
         with:
           script: |
             const ok = process.env.DEPLOY_OUTCOME === 'success';
@@ -100,9 +103,10 @@ jobs:
             try { url = JSON.parse(process.env.APP_JSON).live_url || ''; } catch (e) {}
             const sha = context.payload.pull_request.head.sha.slice(0, 7);
             const marker = '<!-- do-preview-app -->';
+            const databaseRow = process.env.HAS_DB === 'true' ? '| **Database** | its own throwaway dev database |\n' : '';
             const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const body = ok
-              ? `${marker}\n### 🚀 Preview app ready\n| | |\n|---|---|\n| **URL** | ${url} |\n| **App** | \`${process.env.APP_NAME}\` |\n| **Commit** | \`${sha}\` |\n| **Database** | its own throwaway dev database |\n\nThis preview is deleted automatically when the pull request is closed.`
+              ? `${marker}\n### 🚀 Preview app ready\n| | |\n|---|---|\n| **URL** | ${url} |\n| **App** | \`${process.env.APP_NAME}\` |\n| **Commit** | \`${sha}\` |\n${databaseRow}\nThis preview is deleted automatically when the pull request is closed.`
               : `${marker}\n### ❌ Preview app failed to deploy\nApp \`${process.env.APP_NAME}\` · commit \`${sha}\` · [workflow run](${run})`;
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
@@ -143,5 +147,5 @@ jobs:
             const existing = comments.find(c => c.body && c.body.includes('<!-- do-preview-app -->'));
             if (existing) {
               await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id,
-                body: '<!-- do-preview-app -->\n### 🧹 Preview app deleted\nThe preview app and its database were removed because this pull request was closed.' });
+                body: '<!-- do-preview-app -->\n### 🧹 Preview app deleted\nThe preview app was removed, along with any database it created, because this pull request was closed.' });
             }
