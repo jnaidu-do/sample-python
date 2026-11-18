@@ -1,1 +1,1 @@
-web: gunicorn server:app --bind 0.0.0.0:${PORT:-8080}
+web: python -c "import sys; sys.exit(1)"

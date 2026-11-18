@@ -1,21 +1,12 @@
-name: sample-python
+name: mars-fail-demo
 region: nyc
 services:
-- name: web
-  environment_slug: python
-  github:
-    repo: jnaidu-do/sample-python
-    branch: main
-    deploy_on_push: true
-  instance_size_slug: apps-s-1vcpu-0.5gb
-  instance_count: 1
-  http_port: 8080
-  envs:
-  - key: DATABASE_URL
-    scope: RUN_TIME
-    value: ${db.DATABASE_URL}
-databases:
-- name: db
-  engine: PG
-  version: "17"
-  production: false
+  - name: web
+    environment_slug: python
+    github:
+      repo: jnaidu-do/sample-python
+      branch: mars-fail-deploy-demo
+      deploy_on_push: true
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+    http_port: 8080
